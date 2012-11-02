@@ -31,7 +31,9 @@
 
 #include "TokenWalker.h"
 
-#define ILMP_VERSION "1.0"
+#define ILMP_VERSION "2.0"
+// This implementation is also compatible with 1.0 servers.
+
 #define ILMP_PING_INTERVAL 60
 
 using boost::asio::ip::tcp;
@@ -131,6 +133,7 @@ private:
 
 	boost::asio::streambuf response;
 
+	int protocolVersion;
 	int respSeq;
 
 public:
@@ -145,7 +148,7 @@ public:
 
 	IlmpStream(boost::asio::io_service& ioService, const std::string& _host, const std::string& _port = "80", const std::string& _siteDir = "") :
 			host(_host), port(_port), ioService(ioService), siteDir(_siteDir == "" ? _host : _siteDir), wasConnected(false), pongWait(false), respSeq(0),
-			resolver(0), socket(0), pingTimer(0) {
+			resolver(0), socket(0), pingTimer(0), protocolVersion(0) {
 		static int ids = 0;
 		id = ids++;
 	}
@@ -346,6 +349,53 @@ private:
 		if (onReady) onReady(); //ioService.post(onReady);
 	}
 
+
+	CallbackPair *getCallback(int pageviewId, int callbackId, bool remove = false)
+	{
+		PageviewMap::iterator pvPtr = callbacks.find(pageviewId);
+
+		if (pvPtr == callbacks.end()) {
+			std::cerr << "Ignoring unknown pageview " << pageviewId << std::endl;
+			return 0;
+		}
+
+		CallbackMap& pvCallbacks = pvPtr->second;
+			// Obtain value from key-value pair
+		
+		CallbackMap::iterator cbPtr = pvCallbacks.find(callbackId);
+		
+		if (cbPtr == pvCallbacks.end()) {
+			std::cerr << "Ignoring unknown callback " << callbackId << " for pageview " << pageviewId << std::endl;
+			return 0;
+		}
+
+		CallbackPair *cbp = &cbPtr->second;
+
+		if (remove) {
+			delete cbp->second;
+			pvCallbacks.erase(callbackId);
+			if (pvCallbacks.empty())
+				callbacks.erase(pageviewId);
+		}
+
+		return cbp;
+	}
+
+
+	void runCallback(IlmpCallback *c, std::string message)
+	{
+		if (message.size() > 0 && message.at(0) == '\005') {
+			// In the future, and when used extensively on larger json sets, we
+			// might want to prevent the .substr() here.
+			c->onJsonData(message.substr(1));
+		}
+		else {
+			StringTokenWalker params(message, '\004', true);
+			c->onData(params);
+		}
+	}
+
+
 	void onData(const boost::system::error_code& err)
 	{
 		if (!socket || err == boost::asio::error::operation_aborted)
@@ -363,91 +413,77 @@ private:
 #endif
 			
 			StringTokenWalker tokens(command, '\002', true);
-			int respId; tokens.next(respId);
-			std::string pageviewId_; tokens.next(pageviewId_);
 
-			if (respId != ++respSeq) {
-				handleError(ILMPERR_PROTOCOL, "Response id sequence mismatch");
-				return;
+			std::string command; tokens.next(command);
+
+			if (protocolVersion < 2) {
+				if (command == "ILMP") { // protocol upgrade
+					tokens.next(protocolVersion);
+					continue;
+				}
+				// We're ILMP version 1 which means that 'command' is actually
+				// the resp id.
+				if (atoi(command.c_str()) != ++respSeq) {
+					handleError(ILMPERR_PROTOCOL, "Response id sequence mismatch");
+					return;
+				}
+				// Read the actual command
+				tokens.next(command);
 			}
-			else if (pageviewId_ == "P") {
-				// Pong
+
+			if (command == "P") {
 				pongWait = false;
 				continue;
 			}
-			else if (pageviewId_ == "U") {
+
+			if (command == "U") {
 				// We need to update.
 				std::cout << "Server instructed to update the client" << std::endl;
 				std::string updateUrl; tokens.tryNext(updateUrl, "");
 				handleError(ILMPERR_PROTOVER, updateUrl);
 				return;
 			}
-
-			int pageviewId = atoi(pageviewId_.c_str());
-			int callbackId; tokens.next(callbackId);
-			std::string refUpdate; tokens.next(refUpdate);
-
-			/*std::cout << "data: command\n"
-				<< "         respId = " << respId << "\n"
-				<< "     pageviewId = " << pageviewId << "\n"
-				<< "     callbackId = " << callbackId << "\n"
-				<< "      refUpdate = " << refUpdate << "\n";*/
-
-			PageviewMap::iterator pvPtr = callbacks.find(pageviewId);
-
-			if (pvPtr == callbacks.end()) {
-#ifdef ILMPDEBUG
-				std::cerr << "Ignoring unknown pageview " << pageviewId << " received in command '" << readable(command) << "'" << std::endl;
-#else
-				std::cerr << "Ignoring unknown pageview " << pageviewId << " received in command" << std::endl;
-#endif
-				continue;
-			}
-
-			CallbackMap& pvCallbacks = pvPtr->second;
-				// Obtain value from key-value pair
 			
-			CallbackMap::iterator cbPtr = pvCallbacks.find(callbackId);
-			
-			if (cbPtr == pvCallbacks.end()) {
-#ifdef ILMPDEBUG
-				std::cerr << "Ignoring unknown callback " << callbackId << " for pageview " << pageviewId << " received in command '" << readable(command) << "'" << std::endl;
-#else
-				std::cerr << "Ignoring unknown callback " << callbackId << " for pageview " << pageviewId << " received in command" << std::endl;
-#endif
-				continue;
-			}
-
-			CallbackPair& cb = cbPtr->second;
-				// Obtain value from key-value pair
-
-			int& refCount = cb.first;
-			IlmpCallback* theCallback = cb.second;
-
-			for (std::string message; tokens.tryNext(message, "");) { // read messages 
-				if (message.size() > 0 && message.at(0) == '\005') {
-					// In the future, and when used extensively on larger json sets, we
-					// might want to prevent the .substr() here.
-					theCallback->onJsonData(message.substr(1));
+			if (protocolVersion >= 2) {
+				if (command[0]=='m') {
+					int pageviewId = atoi(command.substr(1).c_str());
+					for (int callbackId; tokens.tryNext(callbackId);) {
+						std::string message; tokens.next(message);
+						if (callbackId == -3 || callbackId == -4) { // it's a incr/decr refcnt callback
+							int aboutCallbackId = atoi(message.c_str());
+							CallbackPair *cbp = getCallback(pageviewId, aboutCallbackId);
+							if (cbp) {
+								if (callbackId == -3)
+									cbp->first++;
+								else if (--cbp->first <= 0)
+									getCallback(pageviewId, aboutCallbackId, true); // remove
+							}
+						}
+						else {
+							CallbackPair *cbp = getCallback(pageviewId, callbackId);
+							if (cbp)
+								runCallback(cbp->second, message);
+						}
+					}
 				}
-				else {
-					StringTokenWalker params(message, '\004', true);
-					theCallback->onData(params);
+				// else {}; // reserved for future use
+			}
+			else {
+				int pageviewId = atoi(command.c_str());
+				int callbackId; tokens.next(callbackId);
+				std::string refUpdate; tokens.next(refUpdate);
+				
+				CallbackPair *cbp = getCallback(pageviewId, callbackId);
+				if (cbp) {
+					for (std::string message; tokens.tryNext(message, "");)
+						runCallback(cbp->second, message);
+					if (refUpdate.size()) {
+						cbp->first += (refUpdate=="-" ? -1 : (refUpdate=="+" ? 1 : atoi(refUpdate.c_str())));
+						if (cbp->first <= 0)
+							getCallback(pageviewId, callbackId, true); // remove the callback
+					}
 				}
 			}
-
-			if (refUpdate == "-") refCount--;
-			else if (refUpdate == "+") refCount++;
-			else if (refUpdate.size()) refCount = atoi(refUpdate.c_str());
-
-			if (refCount <= 0) {
-				//std::cout << "Refcount <= 0; destructing associated callback object\n";
-				delete theCallback;
-				pvCallbacks.erase(callbackId);
-				if (pvCallbacks.empty()) callbacks.erase(pageviewId);
-			}
-
-			//debugCallbacks();
 		}
 
 		boost::asio::async_read_until(*socket, response, '\001', boost::bind(&IlmpStream::onData, this->sharedPtr(), boost::asio::placeholders::error));
