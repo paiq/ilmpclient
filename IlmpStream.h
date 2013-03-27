@@ -414,7 +414,7 @@ private:
 			
 			StringTokenWalker tokens(command, '\002', true);
 
-			std::string command; tokens.next(command);
+			tokens.next(command);
 
 			if (protocolVersion < 2) {
 				if (command == "ILMP") { // protocol upgrade
