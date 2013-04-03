@@ -1,4 +1,4 @@
-ILMP specification 1.0-draft
+ILMP specification 2.0-draft
 ============================
 
 Summary
@@ -15,7 +15,7 @@ ILMP is based on a long-living TCP session between ILCS and a client, over which
 
 An ILMP client initiates a TCP connection to an ILCS server. When connecting succeeds, the client should send the following initialization sequence:
 
-	"GET /ilcs? ILMP/1.0\n\n"
+	"GET /ilcs? ILMP/2.0\n\n"
 
 Note that although this sequence may resemble a HTTP request, ILMP is not to be regarded as a protocol that is partly based around the HTTP specification. This initial sequence was chosen only because it allows a more uniform ILCS implementations that serves both HTTP and ILMP clients.
 
@@ -33,15 +33,17 @@ Regular outgoing messages consist of an optional site specification, an rpc iden
 
 #### Incoming messages ####
 
-	incoming_message := [sequence_id] \x002 [pageview_id] \x002 [callback_id] \x002 [callback_ref_instr] \x002 ((param \x004?)* \x003?)* \x001
+	incoming_message := 'm' [pageview_id] ( \x002 [callback_id] \x002 ((param \x004?)* \x003?)* )* \x001
 	
-	callback_ref_instr := "" | "+" | "-" | ([0-9]+)</pre>
+Regular incoming messages contain a callback identifier issued by the client in an outgoing message. The client uses it to invoke the callback with the parameters supplied by in the message. Clients should keep track of all local callback identifiers; ILCS keeps track of all callback identifiers of all clients. Negative callback_ids have a special meaning:
 
-Regular incoming messages contain a callback identifier issued by the client in an outgoing message. The client uses it to invoke the callback with the parameters supplied by in the message. Clients should keep track of all local callback identifiers; ILCS keeps track of all callback identifiers of all clients.
+  -3: increment reference count on the callback_id specified as a parameter
+
+  -4: decrement reference count on the callback_id specified as a parameter
 
 #### Invalidation of callbacks ####
 
-Local callback identifiers should remain valid, even after the callback is invoked. ILCS instructions allow a client to determine when a callback is not necessary anymore and may be cleaned up. These instructions are encapsulated in *callback_ref_instr* and require clients to associate an *ilcs_refcount* integer with each local callback. An incoming message may choose to increment, decrement or set an absolute value of the *ilcs_refcount* associated with the callback. When *ilcs_refcount* is 0 or less, the callback will never to be invoked again and associated resources might be cleaned up. New callback identifiers should start with an associated *ilcs_refcount* of 1.
+Local callback identifiers should remain valid, even after the callback is invoked. The ILCS special callback -3 and -4 allow a client to determine when a callback is not necessary anymore and may be cleaned up. Reference counts should start at 1, such that associated callbacks can be cleaned up when they reach 0.
 
 ### Session multiplexing ###
 
